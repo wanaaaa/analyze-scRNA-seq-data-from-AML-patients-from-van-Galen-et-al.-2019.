@@ -1,0 +1,338 @@
+---
+title: "Assignment 4"
+author: "Baiqi Jiang, Fariz Nazir, Wansang Lim, Yiqing Wang"
+date: "2023-11-15"
+output: html_document
+---
+
+# Assignment for scRNA-seq Module
+
+## AML Hierarchies
+
+Assignment: analyze scRNA-seq data from AML patients from van Galen et al. 2019.
+
+### Part 1 - QC and preliminary analysis
+
+#### Download expression matrices (“dem”) and metadata (“anno”) for the following samples:
+
+- Healthy: BM3, BM4, BM5-34p, BM5-34p38n
+- AML: AML419A-D0, AML707B-D0, AML916, AML921A-D0
+
+#### Import data to R and use Seurat to normalize, merge, and cluster data to generate plots. Label UMAP plots by:
+
+- cell type
+- patient
+- malignancy status
+
+```{r}
+# load libraries
+library(tidyverse)
+library(Seurat)
+library(ggsci)
+```
+
+```{r}
+# make a Seurat object for a single sample
+makeSeurat <- function(dem_tbl, annot_tbl) {
+  # convert tibble to matrix
+  dem_mat <- dem_tbl %>% column_to_rownames("Gene") %>% as.matrix()
+
+  #dem_mat %>% colSums() %>% summary()
+
+  # convert tibble to data frame
+  anno_df <- annot_tbl %>% column_to_rownames("Cell") %>% as.data.frame()
+
+  # make Seurat object
+  so <- CreateSeuratObject(counts = dem_mat, min.cells = 1, min.features = 1)
+
+  # calculate percentage of reads that map to mitochondria
+  so[["pct_mito"]] <- PercentageFeatureSet(so, pattern = "^MT-")
+
+  # add annotation data to Seurat object
+  so <- AddMetaData(so, metadata = anno_df)
+
+  # log-normalize counts
+  so <- NormalizeData(so , normalization.method = "LogNormalize", verbose = F)
+  #so@assays$RNA$data %>% expm1() %>% colSums() %>% summary()
+
+  return(so)
+}
+```
+
+Integration after merging multiple Seurat objects is recommended, because our samples come from differen donors, and integration helps match shared cell types and states across datasets.
+
+The reason of rejoining layers is that merging creates a single object but keeps expression information in different layers. Therefore, after merging and integration, rejoining layers is necessary.
+
+```{r}
+# integrate a merged object and rejoin layers
+integrateJoin <- function(so) {
+  # integrate the merged object
+  so <- IntegrateLayers(object = so, method = RPCAIntegration, orig.reduction = "pca",
+                        new.reduction = "integrated.rpca", verbose = F)
+  # rejoin layers
+  so[["RNA"]] <- JoinLayers(so[["RNA"]])
+
+  return(so)
+}
+```
+
+```{r}
+# run scaling, PCA, integration, and UMAP for a Seurat object
+doRunUMAP <- function(so) {
+  so <- FindVariableFeatures(so, verbose = F)
+  so <- ScaleData(so, vars.to.regress = "pct_mito", verbose = F)
+  so <- RunPCA(so, verbose = F)
+
+  so <- integrateJoin(so)
+
+  so <- RunUMAP(so, dims = 1:30, verbose = F) # dims: number of PCA dimensions to include for UMAP
+
+  return(so)
+}
+```
+
+```{r}
+# cluster cells
+# res is the resolution to find clusters and can affect number of clusters
+cluster <- function(so, res) {
+  so <- FindNeighbors(so, dims = 1:30, verbose = F)
+  so <- FindClusters(so, resolution = res, verbose = F)
+  return(so)
+}
+```
+
+```{r}
+# find DE genes in the Seurat object for each type in IDENTS
+# Only top five DE genes per type, sorted by logFC, are returned.
+doFindMarkers <- function(so, idents) {
+  DefaultAssay(so) <- "RNA"
+  Idents(so) <- idents
+
+  markers <- FindAllMarkers(so, only.pos = T, min.pct = 0.2, test.use = "wilcox",
+                            logfc.threshold = 0.2, min.cells.group = 10, verbose = F)
+
+  markers_selected <- markers %>%
+           group_by(cluster) %>%
+           slice_max(n = 5, order_by = avg_log2FC)
+
+  return(markers_selected)
+}
+```
+
+```{r}
+# read count and annotation files and make a Seurat object for each sample
+path <- "C:/NYU/classes/fall_2023/bioinformatics/assignment/assignment_4/data"
+
+BM3_dem_tbl <- read_tsv(file = file.path(path, "GSM3587998_BM3.dem.txt.gz"), show_col_types = FALSE)
+BM3_annot_tbl <- read_tsv(file = file.path(path, "GSM3587999_BM3.anno.txt.gz"), show_col_types = FALSE)
+BM3_so <- makeSeurat(dem_tbl = BM3_dem_tbl, annot_tbl = BM3_annot_tbl)
+
+BM4_dem_tbl <- read_tsv(file = file.path(path, "GSM3588000_BM4.dem.txt.gz"), show_col_types = FALSE)
+BM4_annot_tbl <- read_tsv(file = file.path(path, "GSM3588001_BM4.anno.txt.gz"), show_col_types = FALSE)
+BM4_so <- makeSeurat(dem_tbl = BM4_dem_tbl, annot_tbl = BM4_annot_tbl)
+
+BM5_34p_dem_tbl <- read_tsv(file = file.path(path, "GSM3588002_BM5-34p.dem.txt.gz"), show_col_types = FALSE)
+BM5_34p_annot_tbl <- read_tsv(file = file.path(path, "GSM3588002_BM5-34p.anno.txt.gz"), show_col_types = FALSE)
+BM5_34p_so <- makeSeurat(dem_tbl = BM5_34p_dem_tbl, annot_tbl = BM5_34p_annot_tbl)
+
+BM5_34p38n_dem_tbl <- read_tsv(file = file.path(path, "GSM3588003_BM5-34p38n.dem.txt.gz"), show_col_types = FALSE)
+BM5_34p38n_annot_tbl <- read_tsv(file = file.path(path, "GSM3588003_BM5-34p38n.anno.txt.gz"), show_col_types = FALSE)
+BM5_34p38n_so <- makeSeurat(dem_tbl = BM5_34p38n_dem_tbl, annot_tbl = BM5_34p38n_annot_tbl)
+
+AML419A_dem_tbl <- read_tsv(file = file.path(path, "GSM3587950_AML419A-D0.dem.txt.gz"), show_col_types = FALSE)
+AML419A_annot_tbl <- read_tsv(file = file.path(path, "GSM3587951_AML419A-D0.anno.txt.gz"), show_col_types = FALSE)
+AML419A_so <- makeSeurat(dem_tbl = AML419A_dem_tbl, annot_tbl = AML419A_annot_tbl)
+
+AML707B_dem_tbl <- read_tsv(file = file.path(path, "GSM3587969_AML707B-D0.dem.txt.gz"), show_col_types = FALSE)
+AML707B_annot_tbl <- read_tsv(file = file.path(path, "GSM3587970_AML707B-D0.anno.txt.gz"), show_col_types = FALSE)
+AML707B_so <- makeSeurat(dem_tbl = AML707B_dem_tbl, annot_tbl = AML707B_annot_tbl)
+
+AML916_dem_tbl <- read_tsv(file = file.path(path, "GSM3587988_AML916-D0.dem.txt.gz"), show_col_types = FALSE)
+AML916_annot_tbl <- read_tsv(file = file.path(path, "GSM3587989_AML916-D0.anno.txt.gz"), show_col_types = FALSE)
+AML916_so <- makeSeurat(dem_tbl = AML916_dem_tbl, annot_tbl = AML916_annot_tbl)
+
+AML921A_dem_tbl <- read_tsv(file = file.path(path, "GSM3587990_AML921A-D0.dem.txt.gz"), show_col_types = FALSE)
+AML921A_annot_tbl <- read_tsv(file = file.path(path, "GSM3587991_AML921A-D0.anno.txt.gz"), show_col_types = FALSE)
+AML921A_so <- makeSeurat(dem_tbl = AML921A_dem_tbl, annot_tbl = AML921A_annot_tbl)
+```
+
+```{r}
+# merge Seurat objects for healthy samples to one obejct and merge Seurat objects for AML sample to another object
+BM_all_so <- merge(x = BM3_so, y = c(BM4_so, BM5_34p_so, BM5_34p38n_so), project = "BM")
+AML_all_so <- merge(x = AML419A_so, y = c(AML707B_so, AML916_so, AML921A_so), project = "AML")
+```
+
+```{r}
+# run scaling, PCA, integration, and UMAP for the merged objects
+BM_all_so <- doRunUMAP(so = BM_all_so)
+AML_all_so <- doRunUMAP(so = AML_all_so)
+```
+
+```{r}
+# save the two merged objects to the disk
+# saveRDS(BM_all_so, file = file.path(path, "BM_all_so.rds"))
+# saveRDS(AML_all_so, file = file.path(path, "AML_all_so.rds"))
+```
+
+```{r}
+# BM_all_so <- readRDS(file = file.path(path, "BM_all_so.rds"))
+# AML_all_so <- readRDS(file = file.path(path, "AML_all_so.rds"))
+```
+
+```{r}
+# UMAP plot of healthy samples labeled by cell type, patient, and malignancy status
+DimPlot(BM_all_so, reduction = "umap", group.by = "CellType", shuffle = TRUE) + theme(aspect.ratio = 1) + scale_color_igv() +
+        ggtitle(label = "BM by Cell Type")
+DimPlot(BM_all_so, reduction = "umap", group.by = "orig.ident", shuffle = TRUE) + theme(aspect.ratio = 1) + scale_color_igv() +
+        ggtitle(label = "BM by Patient")
+DimPlot(BM_all_so, reduction = "umap", group.by = "PredictionRefined", shuffle = TRUE) + theme(aspect.ratio = 1) + scale_color_igv() +
+        ggtitle(label = "BM by Malignancy Status")
+```
+
+```{r}
+# UMAP plot of AML samples labeled by cell type, patient, and malignancy status
+DimPlot(AML_all_so, reduction = "umap", group.by = "CellType", shuffle = TRUE) + theme(aspect.ratio = 1) + scale_color_igv() +
+        ggtitle(label = "AML by Cell Type")
+DimPlot(AML_all_so, reduction = "umap", group.by = "orig.ident", shuffle = TRUE) + theme(aspect.ratio = 1) + scale_color_igv() +
+        ggtitle(label = "AML by Patient")
+DimPlot(AML_all_so, reduction = "umap", group.by = "PredictionRefined", shuffle = TRUE) + theme(aspect.ratio = 1) + scale_color_igv() +
+        ggtitle(label = "AML by Malignancy Status")
+```
+
+#### Describe your results and any interesting findings. How do your cell clusters correlate to these annotations?
+
+For BM samples, it looks like the UMAP plot is well separated by cell type and not as well separated by patient. Cell types such as B, T, NK, and Ery cells cluster well with each other and separate with other cells. As for patient, the BM5-34p38n cells cluster well, while BM3 and BM4 cells are separated in different patches. It seems the main difference between the cells of these healthy donors is driven by cell type.
+
+The AML samples tell a different story. Cell type is no longer a major driver of cell separation on UMAP, and now the cells clearly cluster by patient. This means the main difference among cells is explained by donor difference. When we look at malignancy status, it seems that the normal and malignant cells do not separate well, although there are small islands of normal cells clustered together. The majority of these clustered normal cells are from patient AML921A.
+
+
+### Part 2 - differential gene expression
+
+#### Use the FindMarkers function in Seurat to generate differentially expressed (DGE) genes matrices comparing:
+
+- Clusters
+- Cell types within AML and healthy patients
+- Malignancy status within same cell types of AML patients
+
+##### DGE genes for different clusters:
+
+First we need to find clusters for the BM samples. The resolution parameter was set to 0.4 because, as shown in the UMAP plot below, the resulting 12 clusters show good separation.
+
+```{r}
+# find clusters for BM samples
+BM_all_so <- cluster(so = BM_all_so, res = 0.4)
+DimPlot(BM_all_so, reduction = "umap", group.by = "seurat_clusters", shuffle = T) + theme(aspect.ratio = 1) + ggtitle(label = "BM by Cluster")
+```
+
+The clusters found for BM samples also correspond relatively well with cell types.
+
+Then we need to find clusters for the AML samples. The resolution parameter was set to 0.4 again as it produced clusters that show nice separation.
+
+```{r}
+# find clusters for AML samples
+AML_all_so <- cluster(so = AML_all_so, res = 0.4)
+DimPlot(AML_all_so, reduction = "umap", group.by = "seurat_clusters", shuffle = T) + theme(aspect.ratio = 1) + ggtitle(label = "AML by Cluster")
+```
+
+Next we will find top 5 DE genes for each cluster in the BM merged object.
+
+```{r}
+BM_markers_cluster_selected <- doFindMarkers(so = BM_all_so, idents = "seurat_clusters")
+# saveRDS(BM_markers_cluster_selected, file = file.path(path, "BM_markers_cluster_selected.RDS"))
+```
+
+Next we find top 5 DE genes for each cluster in the AML merged object.
+
+```{r}
+AML_markers_cluster_selected <- doFindMarkers(so = AML_all_so, idents = "seurat_clusters")
+# saveRDS(AML_markers_cluster_selected, file = file.path(path, "AML_markers_cluster_selected.RDS"))
+```
+
+##### DE genes for different cell types within AML and healthy patients:
+
+```{r}
+BM_markers_cellType_selected <- doFindMarkers(so = BM_all_so, idents = "CellType")
+# saveRDS(BM_markers_cellType_selected, file = file.path(path, "BM_markers_cellType_selected.RDS"))
+```
+
+```{r}
+AML_markers_cellType_selected <- doFindMarkers(so = AML_all_so, idents = "CellType")
+# saveRDS(AML_markers_cellType_selected, file = file.path(path, "AML_markers_cellType_selected.RDS"))
+```
+
+##### DE genes for different malignancy statuses within same cell types of AML patients
+
+We will first subset the AML merged object by cell type and then find DE genes for different malignancy statuses in each cell type.
+
+```{r}
+# make a vector to store union of all top DE genes for different malignancy statuses within each cell type
+AML_markers_malignancy_byCellType <- NULL
+
+for (cellType in unique(AML_all_so@meta.data$CellType)) {
+  print(cellType)
+
+  ct_so <- subset(AML_all_so, subset = CellType == cellType)
+
+  if (length(unique(ct_so@meta.data$PredictionRefined)) == 2) {
+    ct_markers_malignancy_selected <- doFindMarkers(so = ct_so, idents = "PredictionRefined")
+    # append to the list
+    AML_markers_malignancy_byCellType <- union(AML_markers_malignancy_byCellType, ct_markers_malignancy_selected$gene)
+  } else {
+    print("only one type found")
+  }
+}
+```
+
+After subsetting the AML merged object by cell type, all subset objects only contains cells of one malignancy status, so we could not compare two malignancy statuses within the same cell type and generate DE genes.
+
+Instead, we compared the two malignancy statuses without separating by cell type.
+
+```{r}
+AML_markers_malignancy_selected <- doFindMarkers(so = AML_all_so, idents = "PredictionRefined")
+# saveRDS(AML_markers_malignancy_selected, file = file.path(path, "AML_markers_malignancy_selected.RDS"))
+```
+
+#### Generate heatmaps for top differentially expressed genes from these analyses
+
+Here we down-sampled the cells prior to making the heatmaps to make them look less crowded.
+
+```{r, fig.width=3, fig.height=2}
+png(filename = file.path(path, "BM_cluster_heatmap.png"), width = 3000, height = 2000, res = 300)
+print(DoHeatmap(subset(BM_all_so, downsample = 100), features = BM_markers_cluster_selected$gene))
+dev.off()
+
+png(filename = file.path(path, "AML_cluster_heatmap.png"), width = 3000, height = 2000, res = 300)
+print(DoHeatmap(subset(AML_all_so, downsample = 100), features = AML_markers_cluster_selected$gene))
+dev.off()
+```
+
+```{r}
+png(filename = file.path(path, "BM_cellType_heatmap.png"), width = 3000, height = 2000, res = 300)
+print(DoHeatmap(subset(BM_all_so, downsample = 100), features = BM_markers_cellType_selected$gene))
+dev.off()
+
+png(filename = file.path(path, "AML_cellType_heatmap.png"), width = 3000, height = 2000, res = 300)
+print(DoHeatmap(subset(AML_all_so, downsample = 100), features = AML_markers_cellType_selected$gene))
+dev.off()
+```
+
+```{r}
+png(filename = file.path(path, "AML_malignancy_heatmap.png"), width = 3000, height = 2000, res = 300)
+print(DoHeatmap(subset(AML_all_so, downsample = 100), features = AML_markers_malignancy_selected$gene))
+dev.off()
+```
+
+#### Describe your results and any interesting findings. Are there any genes that are commonly upregulated in malignant vs. healthy cells within the same cell type in AML cells?
+
+```{r}
+intersect(BM_markers_cluster_selected$gene, BM_markers_cellType_selected$gene)
+intersect(AML_markers_cluster_selected$gene, AML_markers_cellType_selected$gene)
+
+intersect(BM_markers_cellType_selected$gene, AML_markers_cellType_selected$gene)
+```
+
+Remember that the criterium we used to select DE gene is: top 5 logFC genes in at least one type (cluster, cell type, or malignancy). Here, in order to compare the DE genes obtained from different analyses, we took multiple intersects to see common DE genes.
+
+We can see that there are about 40 genes that are top DE genes in at least one cluster in BM samples, that are also top DE genes in at least one cell type in BM samples. There are about 20 genes in a similar situation in AML samples.
+
+There are about 30 genes that are top DE genes in at least one cell type in BM samples, that are also top DE genes in at least one cell type in AML samples. These seem to be differentially expressed in a certain cell type, no matter if the patient is healthy or has AML.
